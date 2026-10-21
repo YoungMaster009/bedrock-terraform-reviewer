@@ -224,3 +224,6 @@ __marimo__/
 *.tfstate
 *.tfstate.*
 tfplan
+
+# Raw Terraform plans can contain secrets
+plans/
