@@ -1,0 +1,31 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.16.3",
+  "resource_changes": [
+    {
+      "address": "module.compute.aws_launch_template.this",
+      "mode": "managed",
+      "type": "aws_launch_template",
+      "name": "this",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create",
+          "delete"
+        ],
+        "before": {
+          "image_id": "ami-0aaa1111"
+        },
+        "after": {
+          "image_id": "ami-0bbb2222"
+        },
+        "after_unknown": {},
+        "replace_paths": [
+          [
+            "image_id"
+          ]
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.16.3",
+  "resource_changes": [
+    {
+      "address": "module.compute.aws_instance.web",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "web",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "delete",
+          "create"
+        ],
+        "before": {
+          "ami": "ami-0aaa1111",
+          "instance_type": "t3.micro"
+        },
+        "after": {
+          "ami": "ami-0bbb2222",
+          "instance_type": "t3.micro"
+        },
+        "after_unknown": {},
+        "replace_paths": [
+          [
+            "ami"
+          ]
+        ]
+      }
+    }
+  ]
+}
