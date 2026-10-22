@@ -1,4 +1,5 @@
 """Phase 3 tests: each safety rule fires when it should, and stays quiet when it shouldn't."""
+import json
 from pathlib import Path
 
 import pytest
@@ -98,4 +99,98 @@ def test_deleting_a_security_group_rule_is_not_an_exposure():
     c = Change("aws_security_group.a", "aws_security_group", "delete",
                {"ingress": [{"from_port": 22, "to_port": 22, "protocol": "tcp",
                              "cidr_blocks": ["0.0.0.0/0"]}]}, None)
+    assert evaluate([c]) == []
+
+
+# ---------- Rule 4: IAM wildcards ----------
+
+def policy(*statements):
+    return json.dumps({"Version": "2012-10-17", "Statement": list(statements)})
+
+
+def iam(type_, after, unknown=None):
+    return Change(f"{type_}.x", type_, "create", None, after, after_unknown=unknown or {})
+
+
+def test_admin_inline_policy_is_blocked():
+    [f] = findings_for("iam_admin_policy")
+    assert (f.rule, f.severity) == ("IAM_WILDCARD", BLOCK)
+
+
+def test_attaching_administrator_access_is_blocked():
+    c = iam("aws_iam_role_policy_attachment",
+            {"role": "ci", "policy_arn": "arn:aws:iam::aws:policy/AdministratorAccess"})
+    [f] = evaluate([c])
+    assert f.severity == BLOCK
+
+
+def test_whole_service_on_everything_warns():
+    c = iam("aws_iam_policy", {"policy": policy({"Effect": "Allow", "Action": ["s3:*"], "Resource": "*"})})
+    [f] = evaluate([c])
+    assert f.severity == WARN and "s3:*" in f.message
+
+
+def test_scoped_policy_is_fine():
+    c = iam("aws_iam_policy", {"policy": policy({"Effect": "Allow", "Action": "s3:GetObject",
+                                                 "Resource": "arn:aws:s3:::dev-site/*"})})
+    assert evaluate([c]) == []
+
+
+def test_admin_actions_on_one_resource_are_not_full_admin():
+    c = iam("aws_iam_policy", {"policy": policy({"Effect": "Allow", "Action": "*",
+                                                 "Resource": "arn:aws:s3:::dev-site"})})
+    assert evaluate([c]) == []
+
+
+def test_deny_wildcard_is_fine():
+    c = iam("aws_iam_policy", {"policy": policy({"Effect": "Deny", "Action": "*", "Resource": "*"})})
+    assert evaluate([c]) == []
+
+
+def test_admin_inline_policy_on_a_role_is_blocked():
+    c = iam("aws_iam_role", {"inline_policy": [{"name": "x", "policy": policy(
+        {"Effect": "Allow", "Action": "*", "Resource": "*"})}]})
+    [f] = evaluate([c])
+    assert f.severity == BLOCK and "inline_policy[0]" in f.address
+
+
+def test_policy_known_only_after_apply_warns_instead_of_passing_silently():
+    c = iam("aws_iam_policy", {"policy": None}, unknown={"policy": True})
+    [f] = evaluate([c])
+    assert f.severity == WARN and "not known" in f.message
+
+
+# ---------- Rule 5: public S3 ----------
+
+def test_turning_off_block_public_access_is_blocked():
+    [f] = findings_for("s3_public_bucket")
+    assert (f.rule, f.severity) == ("S3_PUBLIC", BLOCK)
+    assert "block_public_policy" in f.message and "restrict_public_buckets" in f.message
+
+
+def test_full_block_public_access_is_fine():
+    c = Change("aws_s3_bucket_public_access_block.b", "aws_s3_bucket_public_access_block", "create", None,
+               {"block_public_acls": True, "block_public_policy": True,
+                "ignore_public_acls": True, "restrict_public_buckets": True})
+    assert evaluate([c]) == []
+
+
+def test_public_read_acl_is_blocked():
+    c = Change("aws_s3_bucket_acl.b", "aws_s3_bucket_acl", "create", None, {"acl": "public-read"})
+    [f] = evaluate([c])
+    assert f.severity == BLOCK
+
+
+def test_bucket_policy_open_to_anyone_is_blocked():
+    c = Change("aws_s3_bucket_policy.b", "aws_s3_bucket_policy", "create", None, {"policy": policy(
+        {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/*"})})
+    [f] = evaluate([c])
+    assert f.severity == BLOCK
+
+
+def test_bucket_policy_for_cloudfront_with_condition_is_fine():
+    c = Change("aws_s3_bucket_policy.b", "aws_s3_bucket_policy", "create", None, {"policy": policy(
+        {"Effect": "Allow", "Principal": {"Service": "cloudfront.amazonaws.com"},
+         "Action": "s3:GetObject", "Resource": "arn:aws:s3:::b/*",
+         "Condition": {"StringEquals": {"AWS:SourceArn": "arn:aws:cloudfront::1:distribution/X"}}})})
     assert evaluate([c]) == []

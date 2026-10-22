@@ -1,0 +1,25 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.16.3",
+  "resource_changes": [
+    {
+      "address": "aws_iam_role_policy.deploy",
+      "mode": "managed",
+      "type": "aws_iam_role_policy",
+      "name": "deploy",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "name": "deploy",
+          "role": "ci-deploy",
+          "policy": "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Action\": \"*\", \"Resource\": \"*\"}]}"
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 These rules decide pass or fail. The LLM (Phase 4) only explains the findings;
 it never makes the safety decision.
 """
+import json
 import sys
 from dataclasses import dataclass
 
@@ -91,7 +92,100 @@ def check_admin_ports(c: Change) -> list[Finding]:
     return findings
 
 
-RULES = [check_destroys, check_admin_ports]
+# ---------- Rule 4: IAM wildcards ----------
+
+POLICY_TYPES = {"aws_iam_policy", "aws_iam_role_policy", "aws_iam_user_policy", "aws_iam_group_policy"}
+ATTACHMENT_TYPES = {"aws_iam_role_policy_attachment", "aws_iam_user_policy_attachment",
+                    "aws_iam_group_policy_attachment", "aws_iam_policy_attachment"}
+ADMIN_POLICY_ARN = "arn:aws:iam::aws:policy/AdministratorAccess"
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _statements(policy_json: str) -> list[dict]:
+    doc = json.loads(policy_json)
+    return [s for s in _as_list(doc.get("Statement")) if isinstance(s, dict)]
+
+
+def _wildcard_findings(address: str, policy_json: str) -> list[Finding]:
+    findings = []
+    for s in _statements(policy_json):
+        if s.get("Effect") != "Allow":
+            continue
+        actions = _as_list(s.get("Action"))
+        if "*" not in _as_list(s.get("Resource")):
+            continue
+        if "*" in actions or "*:*" in actions:
+            findings.append(Finding("IAM_WILDCARD", BLOCK, address,
+                                    'Allows every action ("*") on every resource ("*"): full admin.'))
+        else:
+            broad = sorted(a for a in actions if isinstance(a, str) and a.endswith(":*"))
+            if broad:
+                findings.append(Finding("IAM_WILDCARD", WARN, address,
+                                        f"Allows all of {', '.join(broad)} on every resource. Scope it down."))
+    return findings
+
+
+def check_iam(c: Change) -> list[Finding]:
+    if c.action not in ("create", "update", "replace"):
+        return []
+    a = c.after or {}
+
+    if c.type in ATTACHMENT_TYPES and a.get("policy_arn") == ADMIN_POLICY_ARN:
+        return [Finding("IAM_WILDCARD", BLOCK, c.address, "Attaches the AdministratorAccess managed policy.")]
+
+    policies = []                                   # (label, json string or None)
+    if c.type in POLICY_TYPES:
+        policies.append((c.address, a.get("policy")))
+    if c.type == "aws_iam_role":
+        for i, inline in enumerate(a.get("inline_policy") or []):
+            policies.append((f"{c.address} inline_policy[{i}]", inline.get("policy")))
+
+    findings = []
+    for label, policy in policies:
+        if policy:
+            findings += _wildcard_findings(label, policy)
+        elif c.type in POLICY_TYPES and c.after_unknown.get("policy"):
+            findings.append(Finding("IAM_WILDCARD", WARN, label,
+                                    "Policy is not known until apply, so it could not be checked."))
+    return findings
+
+
+# ---------- Rule 5: public S3 ----------
+
+PUBLIC_ACLS = {"public-read", "public-read-write", "authenticated-read"}
+BLOCK_SETTINGS = ["block_public_acls", "block_public_policy", "ignore_public_acls", "restrict_public_buckets"]
+
+
+def check_s3_public(c: Change) -> list[Finding]:
+    if c.action not in ("create", "update", "replace"):
+        return []
+    a = c.after or {}
+
+    if c.type == "aws_s3_bucket_public_access_block":
+        off = [s for s in BLOCK_SETTINGS if a.get(s) is False]
+        if off:
+            return [Finding("S3_PUBLIC", BLOCK, c.address,
+                            f"Turns off Block Public Access: {', '.join(off)}.")]
+
+    if c.type in ("aws_s3_bucket_acl", "aws_s3_bucket") and a.get("acl") in PUBLIC_ACLS:
+        return [Finding("S3_PUBLIC", BLOCK, c.address, f'Uses the public ACL "{a["acl"]}".')]
+
+    if c.type == "aws_s3_bucket_policy" and a.get("policy"):
+        for s in _statements(a["policy"]):
+            principal = s.get("Principal")
+            anyone = principal == "*" or (isinstance(principal, dict) and "*" in _as_list(principal.get("AWS")))
+            if s.get("Effect") == "Allow" and anyone and not s.get("Condition"):
+                return [Finding("S3_PUBLIC", BLOCK, c.address,
+                                'Bucket policy allows anyone ("Principal": "*") with no condition.')]
+    return []
+
+
+RULES = [check_destroys, check_admin_ports, check_iam, check_s3_public]
 
 
 def evaluate(changes: list[Change]) -> list[Finding]:

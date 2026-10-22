@@ -13,6 +13,7 @@ class Change:
     before: dict | None     # attributes before the change (None for create)
     after: dict | None      # attributes after the change (None for delete)
     replace_paths: list = field(default_factory=list)  # which attributes force a replace
+    after_unknown: dict = field(default_factory=dict)  # attributes "known after apply"
 
 
 def classify(actions: list[str]) -> str:
@@ -44,6 +45,7 @@ def parse_changes(plan: dict) -> list[Change]:
             before=change.get("before"),
             after=change.get("after"),
             replace_paths=change.get("replace_paths", []),
+            after_unknown=change.get("after_unknown") or {},
         ))
     return changes
 
