@@ -150,7 +150,7 @@ def check_iam(c: Change) -> list[Finding]:
         if policy:
             findings += _wildcard_findings(label, policy)
         elif c.type in POLICY_TYPES and c.after_unknown.get("policy"):
-            findings.append(Finding("IAM_WILDCARD", WARN, label,
+            findings.append(Finding("IAM_POLICY_UNKNOWN", WARN, label,
                                     "Policy is not known until apply, so it could not be checked."))
     return findings
 

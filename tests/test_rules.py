@@ -157,7 +157,8 @@ def test_admin_inline_policy_on_a_role_is_blocked():
 def test_policy_known_only_after_apply_warns_instead_of_passing_silently():
     c = iam("aws_iam_policy", {"policy": None}, unknown={"policy": True})
     [f] = evaluate([c])
-    assert f.severity == WARN and "not known" in f.message
+    assert (f.rule, f.severity) == ("IAM_POLICY_UNKNOWN", WARN)
+    assert "not known" in f.message
 
 
 # ---------- Rule 5: public S3 ----------
