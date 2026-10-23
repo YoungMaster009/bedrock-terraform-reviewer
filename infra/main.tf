@@ -44,9 +44,12 @@ locals {
   p1_repo_id    = "1385934191"
   p1_pr_subject = "repo:${local.owner}@${local.owner_id}/${local.p1_repo}@${local.p1_repo_id}:pull_request"
 
-  # Nova Lite, called through the US cross-Region inference profile.
-  inference_profile_arn = "arn:aws:bedrock:us-west-1:${local.account_id}:inference-profile/us.amazon.nova-lite-v1:0"
-  model_arn             = "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
+  # Every model is called through a US cross-Region inference profile. This account's
+  # direct (single-Region) quotas are 0; its cross-Region quotas are not.
+  models = {
+    nova_lite    = "amazon.nova-lite-v1:0" # writes the review
+    cohere_embed = "cohere.embed-v4:0"     # embeds standards for retrieval (RAG)
+  }
 }
 
 data "aws_iam_policy_document" "trust" {
@@ -75,36 +78,42 @@ data "aws_iam_policy_document" "trust" {
 
 resource "aws_iam_role" "plan_reviewer" {
   name                 = "github-actions-plan-reviewer"
-  description          = "Lets Project 1 pull requests call Nova Lite on Bedrock, nothing else"
+  description          = "Lets Project 1 pull requests call two Bedrock models, nothing else"
   assume_role_policy   = data.aws_iam_policy_document.trust.json
   max_session_duration = 3600
 }
 
 data "aws_iam_policy_document" "bedrock" {
-  # Call the inference profile in our home region.
-  statement {
-    sid       = "InvokeNovaLiteProfile"
-    actions   = ["bedrock:InvokeModel"]
-    resources = [local.inference_profile_arn]
+  # Call each model's US inference profile in our home region.
+  dynamic "statement" {
+    for_each = local.models
+    content {
+      sid       = "Invoke${replace(title(replace(statement.key, "_", " ")), " ", "")}Profile"
+      actions   = ["bedrock:InvokeModel"]
+      resources = ["arn:aws:bedrock:us-west-1:${local.account_id}:inference-profile/us.${statement.value}"]
+    }
   }
 
-  # The profile routes to Nova Lite in other US regions, so the model ARN needs a
-  # wildcard region. The condition means it's only reachable through our profile.
-  statement {
-    sid       = "InvokeNovaLiteOnlyViaProfile"
-    actions   = ["bedrock:InvokeModel"]
-    resources = [local.model_arn]
+  # The profile routes to the model in other US Regions, so the model ARN needs a wildcard
+  # Region. The condition means each model is only reachable through its own profile.
+  dynamic "statement" {
+    for_each = local.models
+    content {
+      sid       = "Invoke${replace(title(replace(statement.key, "_", " ")), " ", "")}OnlyViaProfile"
+      actions   = ["bedrock:InvokeModel"]
+      resources = ["arn:aws:bedrock:*::foundation-model/${statement.value}"]
 
-    condition {
-      test     = "StringEquals"
-      variable = "bedrock:InferenceProfileArn"
-      values   = [local.inference_profile_arn]
+      condition {
+        test     = "StringEquals"
+        variable = "bedrock:InferenceProfileArn"
+        values   = ["arn:aws:bedrock:us-west-1:${local.account_id}:inference-profile/us.${statement.value}"]
+      }
     }
   }
 }
 
 resource "aws_iam_role_policy" "bedrock" {
-  name   = "invoke-nova-lite-only"
+  name   = "invoke-approved-bedrock-models"
   role   = aws_iam_role.plan_reviewer.id
   policy = data.aws_iam_policy_document.bedrock.json
 }
