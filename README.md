@@ -1,207 +1,141 @@
-# k8s-aws-portfolio
+# bedrock-terraform-reviewer
 
-**A containerized Flask app, scanned and shipped by GitHub Actions, running on a Terraform-built Amazon EKS cluster over HTTPS, with one-click deploy and teardown, even from a phone.**
+**An AI reviewer for Terraform pull requests, built on Amazon Bedrock, where deterministic rules make the safety decision and the model only explains it.**
 
-🔗 **Live demo:** https://live.doiwannaknowthediaryofjane.com
-*(The cluster is created on demand and destroyed afterward to keep costs near zero, so the link is only up during demos.)*
+Every pull request to [terraform-aws-portfolio](https://github.com/YoungMaster009/terraform-aws-portfolio) gets a review comment: a pass/fail verdict from tested Python rules, each finding linked to a team standard, and a plain-English explanation written by Amazon Nova Lite, grounded in those standards. A full review costs about **$0.0002**.
 
-![Live status page with requests split across three pods in two Availability Zones](docs/images/hero-three-pods.png)
+> **Design principle:** I don't let the LLM make the safety decision. Rules decide; the model explains; if the model fails, the review still posts.
 
----
+## What a review looks like
 
-## What this is
+```text
+## ❌ Terraform plan review: FAIL
 
-A small Python web app is built into a non-root Docker image, scanned with Trivy, and pushed to Amazon ECR by GitHub Actions using OIDC, with no stored AWS keys anywhere. A second workflow builds the whole AWS environment with Terraform (VPC, NAT gateway, EKS cluster, managed node group), deploys the newest image with Kustomize, and publishes it at an HTTPS address backed by an ACM certificate and Route 53. A third workflow tears everything down in the correct order, and runs nightly as a safety net. Deploying and destroying is one tap in the GitHub mobile app.
+| Severity | Rule                     | Resource                                  | Finding                          | Standard   |
+|----------|--------------------------|-------------------------------------------|----------------------------------|------------|
+| BLOCK    | ADMIN_PORT_OPEN_TO_WORLD | module.compute.aws_security_group.servers | SSH (port 22) is open to 0.0.0.0/0 | STD-NET-01 |
 
-**Stack:** Docker · Kubernetes · Amazon EKS · Amazon ECR · Terraform · Kustomize · GitHub Actions (OIDC) · Trivy · ACM · Route 53 · Elastic Load Balancing
+### AI explanation (advisory only)
+- Why it matters: Open admin ports are scanned and brute-forced within minutes of going live.
+- Suggestion: Use AWS Systems Manager Session Manager for shell access, or limit the source to a known private range.
+- See STD-NET-01
 
----
+model: us.amazon.nova-lite-v1:0, tool_calls: 1, retrieval: embedding, input_tokens: 2273, output_tokens: 232
+```
 
-## Architecture
+## How it works
 
 ```mermaid
-flowchart TB
-    subgraph BUILD["Build pipeline: runs on every app change"]
-        A["git push"] --> B["GitHub Actions<br/>build-push.yml"]
-        B --> C["Trivy scan<br/>CRITICAL = fail"]
-        C --> D[("Amazon ECR<br/>immutable tags")]
-    end
-
-    subgraph DEPLOY["Deploy pipeline: one click"]
-        E["Run workflow<br/>eks-deploy.yml"] --> F["Terraform apply<br/>VPC, NAT, EKS 1.37, node group"]
-        F --> G["kubectl apply -k overlays/eks<br/>newest image from ECR"]
-        G --> H["Route 53<br/>UPSERT live CNAME"]
-    end
-
-    D -. "image pull" .-> P1
-    D -. "image pull" .-> P2
-    D -. "image pull" .-> P3
-
-    U["Browser / phone"] --> R["live.doiwannaknowthediaryofjane.com"]
-    R --> LB["Classic Load Balancer<br/>:443 TLS with ACM, TCP to pods"]
-    LB --> P1["Pod<br/>us-west-1a"]
-    LB --> P2["Pod<br/>us-west-1c"]
-    LB --> P3["Pod<br/>us-west-1a or 1c"]
+flowchart LR
+    pr([Pull request]) --> plan[terraform plan<br/>show -json]
+    plan --> parse[plan_parser.py<br/>classify every change]
+    parse --> rules[rules.py<br/>6 deterministic rules]
+    rules -->|verdict| gate{BLOCK?}
+    rules --> rag[retrieve.py<br/>hybrid RAG over standards]
+    rag --> agent[review.py<br/>Nova Lite + read-only tools]
+    agent --> comment[PR comment<br/>updated in place]
+    gate -->|yes| fail([check fails])
+    gate -->|no| pass([check passes])
 ```
 
-TLS terminates at the load balancer using a free ACM certificate. Pods run on two t3.medium nodes in private subnets across two Availability Zones and reach ECR through a single NAT gateway. The load balancer itself is created by Kubernetes (from the Service of type `LoadBalancer`), not by Terraform, which matters at teardown time (see below).
+1. **Parse.** `terraform show -json` is turned into a list of changes: create, update, delete, or replace (including `create_before_destroy`), with the attribute that forced each replacement.
+2. **Decide (deterministic).** Six rules produce findings. Any `BLOCK` fails the check.
+3. **Retrieve (hybrid RAG).** Each rule maps directly to the standard it enforces; Cohere Embed v4 finds other relevant standards from `standards.md`, with a keyword fallback if embeddings are unavailable.
+4. **Explain (bounded agent).** Nova Lite receives an outline and calls two read-only tools, `get_change` and `lookup_standard`, for the details it needs, then returns structured JSON.
+5. **Post.** One PR comment, updated on every push. The check then enforces the rules' verdict.
 
----
+## The rules
 
-## The live page
-
-The page shows which pod answered each request, so Kubernetes behavior is visible instead of just described. Browsers get the status page; `curl` gets a one-line text answer (the app checks the `Accept` header).
-
-| Field | Where it comes from |
-|---|---|
-| Greeting | `GREETING` from a ConfigMap (currently "Live") |
-| Version | `APP_VERSION`, baked into the image at build time (the Git commit SHA) |
-| Pod name, node name, pod IP | Kubernetes Downward API, injected as environment variables |
-| Request bars | The page polls `/api/info` every 1.5 seconds and tallies answers per pod |
-
-Pod IPs show the Availability Zone: `10.34.16–31.x` is us-west-1a and `10.34.32–47.x` is us-west-1c.
-
-**Things to demo on it:**
-
-- **Load balancing:** watch the bars fill across all three pods.
-- **Self-healing:** `kubectl delete pod <name>`; the pod disappears from the bars and a replacement appears within seconds.
-- **Zero-downtime rolling update:** push a change, run the deploy, and watch the new version appear mid-stream while old pods keep answering (`maxSurge: 1`, `maxUnavailable: 0`).
-
-| Endpoint | Returns |
-|---|---|
-| `/` | Live status page (browser) or one line of text (curl) |
-| `/api/info` | JSON: greeting, version, pod, node, pod IP, time |
-| `/health` | Used by readiness and liveness probes |
-| `/version` | The running version |
-
-![The page on a phone over HTTPS](docs/images/phone-https.png)
-
----
-
-## Repository layout
-
-```
-.
-├── app/app.py                      # Flask app: status page, /api/info, /health, /version
-├── Dockerfile, .dockerignore       # python:3.12-slim, non-root user, gunicorn on 8080
-├── k8s/                            # Kustomize base (used locally on kind)
-│   ├── deployment.yaml             # 3 replicas, probes, Downward API env vars
-│   ├── service.yaml                # ClusterIP, port 80 -> 8080
-│   ├── configmap.yaml              # GREETING
-│   └── kustomization.yaml
-├── overlays/eks/kustomization.yaml # ECR image + LoadBalancer Service with ACM on 443
-├── infra/
-│   ├── bootstrap/                  # Long-lived, near-free: ECR, IAM roles, ACM cert
-│   │   ├── main.tf                 # ECR repo + push role
-│   │   ├── deploy-role.tf          # Least-privilege EKS deploy role
-│   │   └── https.tf                # ACM certificate + DNS validation
-│   └── eks/                        # Created per demo: VPC, NAT, EKS, node group, access entries
-└── .github/workflows/
-    ├── build-push.yml              # Build -> Trivy -> push to ECR
-    ├── eks-deploy.yml              # One-click deploy
-    └── eks-destroy.yml             # One-click destroy + nightly safety net
-```
-
----
-
-## How to run it
-
-### Locally on kind (free)
-
-```bash
-docker build --build-arg APP_VERSION=v3 -t k8s-aws-portfolio:v3 .
-kind create cluster --name portfolio
-kind load docker-image k8s-aws-portfolio:v3 --name portfolio
-kubectl apply -k k8s
-kubectl port-forward svc/portfolio-app 8080:80
-```
-
-Open http://localhost:8080. Note that `port-forward` connects to a single pod, so the bars will only show one pod locally; use a curl pod inside the cluster to see Service load balancing.
-
-### On AWS
-
-1. **One-time setup** (from a laptop): `terraform apply` in `infra/bootstrap` creates the ECR repo, the two GitHub Actions roles, and the ACM certificate.
-2. **Deploy:** GitHub → Actions → **eks-deploy** → **Run workflow** (or `gh workflow run eks-deploy.yml`). About 10–12 minutes from nothing; 2–3 minutes if the cluster already exists.
-3. **Destroy:** Actions → **eks-destroy** → **Run workflow**. About 11 minutes. It also runs automatically every night at 1:41 AM Central in case I forget.
-
-Deploy and destroy share a concurrency group, so they can never run at the same time; a second run waits its turn.
-
-![Green eks-deploy and eks-destroy runs](docs/images/actions-runs.png)
-
----
-
-## Security design
-
-**No stored credentials.** Every workflow authenticates to AWS with OIDC. The deploy role's trust policy uses an exact `StringEquals` match on the token's `sub` claim, built from the repository's and owner's **immutable numeric IDs** and the `main` branch only. I read the real claim in CloudTrail before writing the condition, so a renamed or recreated repo with the same name can't assume the role.
-
-**Least-privilege deploy role.** The role can build a whole EKS environment, so its guardrails matter:
-
-| Guardrail | What it prevents |
-|---|---|
-| Network actions only in `us-west-1` | Resources spun up in other regions |
-| `eks:*` only on the `k8s-portfolio` cluster | Touching any other cluster |
-| Create/delete only roles named `k8s-portfolio-*` | Managing unrelated IAM roles |
-| Attach only the four EKS managed policies (`iam:PolicyARN` condition) | **Privilege escalation:** creating a role and attaching AdministratorAccess to it |
-| `iam:PassRole` only to `eks.amazonaws.com` | Handing project roles to other services |
-| Route 53 writes limited to one CNAME | Changing any other DNS record in the zone |
-| State access limited to the EKS state key | Reading or overwriting other Terraform state |
-
-**Kubernetes access.** The cluster uses EKS access entries (API authentication mode, no automatic creator admin). My IAM user is cluster admin; the deploy role only gets `AmazonEKSEditPolicy` scoped to the `default` namespace.
-
-**Supply chain.** Trivy scans every image before any AWS step runs, and a CRITICAL finding fails the build. Pull requests build and scan but never push. ECR tags are immutable and scanned on push, and only the newest 10 images are kept.
-
-**Container.** Slim base image, runs as a non-root user, dependencies installed before code is copied, version baked in at build time.
-
----
-
-## Cost controls
-
-Nothing that bills by the hour stays running. Only near-free pieces persist between demos (ECR, IAM roles, the ACM certificate, the Route 53 zone at $0.50/month, and an S3 state bucket). Everything else (VPC, NAT gateway, EKS control plane, nodes, load balancer) is created by **eks-deploy** and removed by **eks-destroy**.
-
-Safety nets: a nightly scheduled destroy, and an AWS Budget that emails at $8 of a $10 monthly limit. A full weekend of building and testing cost about **$1–2**.
-
----
-
-## Teardown order and ownership
-
-Terraform didn't create the load balancer (Kubernetes did, from the Service), so `terraform destroy` doesn't know it exists. Destroying the VPC first would either hang on the load balancer's network interfaces or orphan it. The destroy workflow enforces this order:
-
-| Step | Action | Owner |
+| Rule | Severity | Fires when |
 |---|---|---|
-| 1 | Delete the `live` CNAME | Workflow (Route 53) |
-| 2 | Delete the Kubernetes Service and wait for the load balancer to disappear | Kubernetes |
-| 3 | `terraform destroy` (nodes, cluster, NAT, VPC) | Terraform |
+| `STATEFUL_DESTROY` | BLOCK | A database, bucket, table, volume, KMS key, or secret is deleted or replaced |
+| `REPLACE` | WARN | Any other resource is replaced; names the attribute that forced it |
+| `ADMIN_PORT_OPEN_TO_WORLD` | BLOCK | SSH or RDP open to `0.0.0.0/0` or `::/0`, including port ranges and protocol `-1`, across all three Terraform ingress styles |
+| `IAM_WILDCARD` | BLOCK / WARN | `Action "*"` on `Resource "*"`, an AdministratorAccess attachment, or whole-service wildcards |
+| `IAM_POLICY_UNKNOWN` | WARN | A policy is only known after apply, so it can't be checked; never a silent pass |
+| `S3_PUBLIC` | BLOCK | Block Public Access turned off, a public ACL, or a bucket policy open to `"*"` without a condition |
 
-Removing DNS first means the hostname never points at a load balancer that no longer exists.
+## Guardrails
 
----
+| Guardrail | How it's enforced |
+|---|---|
+| The verdict never comes from the model | Rules run first; a test proves an "approve it, it's safe" model reply can't change a FAIL |
+| No secrets or values reach the model | The model sees attribute *names* only; tested with a password-change fixture |
+| Prompt injection | Injected text in tags and descriptions never reaches the model (architecture, not prompt wording); an injected resource *name* is an eval case |
+| No hallucinated resources or citations | Explanations about unknown addresses and citations of unknown standards are dropped |
+| The agent loop always ends | At most 4 model turns and 6 tool calls; tools are read-only Python, never AWS |
+| AI failure never blocks a review | Any Bedrock error falls back to the rules-only comment |
+| Least-privilege IAM, re-proven on every PR | The role can call two models only through their US inference profiles; CI confirms Nova Pro, the global profile, and direct model calls get `AccessDenied` |
+| Keyless CI | GitHub OIDC with trust pinned to the repository's immutable owner and repo IDs, pull requests only |
 
-## Troubleshooting highlights
+## Evaluation
 
-Real problems I hit while building this, and how I worked through them.
+`evals/run_evals.py` scores 10 cases with known answers, including a prompt-injection case, a secret-in-values case, and a regression case for a real hallucination found during development. Latest run ([report](evals/report.md)):
+
+| Metric | Result |
+|---|---|
+| Deterministic checks (verdict, findings) | **10/10** |
+| AI checks (citation, required and forbidden phrases) | **10/10** |
+| Related-standard precision | **100%** (3/3), up from 30% after tuning |
+| Cost of the full eval run | **$0.0019** |
+
+Plus **82 unit tests** that run on every push with no AWS access, using a fake Bedrock client.
+
+## What went wrong, and what I learned
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Re-running the build job failed at push | ECR's immutable tags rejected the same commit SHA a second time | Added a check-if-tag-exists step. Only `ImageNotFoundException` means "push"; any other error stops the job instead of being treated as a miss |
-| New pods stuck in `ImagePullBackOff` | Manifest referenced a tag that didn't exist. `kubectl describe` Events said "pull access denied," which ECR also returns for missing images | Corrected the tag. Old pods kept serving the whole time because the rollout never removes working pods until new ones are ready |
-| All pods green, but requests refused in ~7 ms | Service selector `app=portfolio-ap` didn't match pod label `app=portfolio-app`. DNS resolved, but the endpoint slice was empty | Found it by checking endpoint slices, then restored the manifest from Git |
-| `terraform destroy` would hang or orphan the load balancer | Kubernetes created the ELB; Terraform never knew about it | Automated the teardown order above: DNS → Service → Terraform |
-| First pipeline run failed at `CreateNodegroup` | EKS checks its service-linked role **as the caller**, and the deploy role lacked `iam:GetRole` on it | Added one read-only permission scoped to EKS service-linked roles. Terraform state let the re-run finish in 2.5 minutes |
-| Site timed out in Edge but the load balancer was healthy | Edge silently upgraded `http://` to `https://`; nothing listened on 443, so the security group dropped it. A timeout points at the network path | Fixed properly by adding HTTPS with an ACM certificate |
-| After adding HTTPS, the page loaded once and then returned 504 | With an HTTP-mode listener, the load balancer held idle connections open and tied up both gunicorn sync workers. Health checks then failed, liveness restarted pods every ~35 s, and readiness emptied the endpoints | Switched the backend protocol to TCP; restarts stopped. The longer-term fix is threaded workers (below) |
+| The model said a policy "allows wildcard permissions" when the rule said it couldn't be checked | The model trusted the rule's *label* (`IAM_WILDCARD`) over its message | Gave the case its own rule ID, added a prompt rule, and made it a permanent eval case |
+| `ThrottlingException` on the very first embedding call | Titan Embeddings' on-demand quota in this account is **0** and not adjustable, in every Region checked | Noticed cross-Region quotas were nonzero (which also explained why Nova Lite always worked) and routed embeddings through Cohere's US inference profile |
+| IAM policy simulator returned `implicitDeny` for the allowed model | The simulator can't evaluate Bedrock inference-profile ARNs (it showed a placeholder ARN) | Treated it as inconclusive and proved the policy with live allowed and denied calls instead |
+| Related standards were mostly irrelevant | Measured 30% precision; scores for short queries clustered between 0.31 and 0.46 | Raised the cutoff to 0.45 based on the eval data; precision 100%, with lower recall as a known trade-off |
+| `requirements.txt` showed as garbled on GitHub | Windows PowerShell's `>` writes UTF-16 | Set the encoding explicitly and added `.gitattributes` on day one |
+| Git refused the repo: "dubious ownership" | The folder was created from an elevated shell | Trusted that one path with `safe.directory`, never `*` |
 
----
+## Costs
 
-## What I'd do next
+| Item | Cost |
+|---|---|
+| One PR review (Nova Lite, about 2–4K tokens in, with tools) | ~$0.0002–0.0003 |
+| One query embedding (Cohere Embed v4) | fractions of a cent |
+| Indexing all 14 standards | one request, cached in `standards_index.json` |
+| Infrastructure that bills by the hour | none |
 
-- **AWS Load Balancer Controller with an ALB**, for HTTP-to-HTTPS redirects and smarter routing than the Classic Load Balancer.
-- **Threaded gunicorn workers (`gthread`)** so idle connections can never starve the app.
-- **Autoscaling:** Horizontal Pod Autoscaler for pods and Cluster Autoscaler or Karpenter for nodes.
-- **Pin actions and the Trivy image to exact SHAs** instead of version tags.
-- **GitOps with Argo CD**, so the cluster pulls its desired state from Git instead of the pipeline pushing it.
+## Repository layout
 
----
+```text
+plan_parser.py        terraform show -json -> list of classified changes
+rules.py              the six deterministic safety rules (the verdict)
+retrieve.py           hybrid RAG: rule mapping + Cohere embeddings + keyword fallback
+tools.py              read-only tools for the agent: get_change, lookup_standard
+review.py             the bounded agent loop and the PR comment
+standards.md          14 team standards, each with Rule, Why, and Fix
+standards_index.json  cached standard embeddings (rebuilt if standards.md changes)
+evals/                cases with known answers, the runner, and the latest report
+security/             live least-privilege proof that runs in CI
+tests/                82 unit tests and 11 fixture plans
+infra/main.tf         the reviewer's IAM role (OIDC trust, two models, profiles only)
+```
 
-## Related
+## Run it locally
 
-**Project 1 — [terraform-aws-portfolio](https://github.com/YoungMaster009/terraform-aws-portfolio):** a multi-environment AWS web stack (VPC, ALB, Auto Scaling, HTTPS) built with Terraform modules, deployed through GitHub Actions with OIDC, plan checks on pull requests, and a protected main branch.
+```powershell
+python -m venv .venv; .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m pytest -q                                          # 82 tests, no AWS
+python review.py tests\fixtures\sg_ssh_open_to_world.json --no-ai   # rules only
+python review.py tests\fixtures\sg_ssh_open_to_world.json           # with Bedrock
+python evals\run_evals.py                                    # full eval, about $0.002
+```
+
+## Limitations and next steps
+
+- **Retrieval recall.** The 0.45 cutoff keeps precision at 100% but shows related standards on only 2 of 10 cases. Next: richer retrieval queries built from finding messages and changed attribute names.
+- **Unknown-at-plan policies.** Policies referencing resources created in the same apply can't be checked; planning against an existing environment closes the gap.
+- **Pinning.** Pin the reviewer checkout and GitHub Actions to commit SHAs for supply-chain safety.
+- **Model comparison.** Run the eval set against a larger model to measure whether its quality gain justifies the cost.
+
+## Related projects
+
+- [terraform-aws-portfolio](https://github.com/YoungMaster009/terraform-aws-portfolio): the multi-environment AWS stack this reviewer guards.
+- [k8s-aws-portfolio](https://github.com/YoungMaster009/k8s-aws-portfolio): a containerized app on Amazon EKS with one-click deploy and teardown.
