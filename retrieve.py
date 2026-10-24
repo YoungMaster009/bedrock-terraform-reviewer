@@ -28,7 +28,7 @@ RULE_TO_STANDARD = {
     "IAM_POLICY_UNKNOWN": "STD-IAM-04",
     "S3_PUBLIC": "STD-DATA-02",
 }
-MIN_SCORE = {"embedding": 0.30, "keyword": 0.15}   # below this, a match is too weak to show
+MIN_SCORE = {"embedding": 0.45, "keyword": 0.15}   # below this, a match is too weak to show
 TOP_K = 2
 
 
@@ -146,15 +146,16 @@ def retrieve(changes, findings, embedder=None) -> tuple[list[dict], dict]:
         print(f"warning: embeddings unavailable ({type(err).__name__}); using keyword match", file=sys.stderr)
         scored = [(keyword_score(query, f"{s.title} {s.text}"), s) for s in candidates]
 
-    related = [s.id for score, s in sorted(scored, key=lambda x: x[0], reverse=True)
-               if score >= MIN_SCORE[mode]][:TOP_K]
+    ranked = sorted(scored, key=lambda x: x[0], reverse=True)
+    related = [s.id for score, s in ranked if score >= MIN_SCORE[mode]][:TOP_K]
 
     def pack(sid, why):
         s = standards[sid]
         return {"id": s.id, "title": s.title, "rule": s.field("Rule"), "fix": s.field("Fix"), "matched_by": why}
 
     result = [pack(sid, "rule") for sid in mapped] + [pack(sid, mode) for sid in related]
-    return result, {"retrieval": mode, "standards_cited": len(result)}
+    top = [(s.id, round(score, 3)) for score, s in ranked[:4]]   # for evals and threshold tuning
+    return result, {"retrieval": mode, "standards_cited": len(result), "top_scores": top}
 
 
 def main() -> None:

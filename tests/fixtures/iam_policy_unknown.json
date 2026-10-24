@@ -1,0 +1,27 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.16.3",
+  "resource_changes": [
+    {
+      "address": "module.app.aws_iam_role_policy.assets_read",
+      "mode": "managed",
+      "type": "aws_iam_role_policy",
+      "name": "assets_read",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "name": "assets-read",
+          "role": "app",
+          "policy": null
+        },
+        "after_unknown": {
+          "policy": true
+        }
+      }
+    }
+  ]
+}

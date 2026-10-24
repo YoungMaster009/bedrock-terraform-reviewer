@@ -121,6 +121,11 @@ def keep_known_addresses(review: dict, findings: list[Finding], standards: list[
     return review
 
 
+def md_code(text: str) -> str:
+    """Safe inline code: for_each keys can contain any text, including backticks and pipes."""
+    return "`" + str(text).replace("`", "'").replace("|", "/").replace("\n", " ") + "`"
+
+
 def render(findings: list[Finding], total_changes: int, review: dict | None, metrics: dict,
            standards: list[dict] | None = None) -> str:
     blocked = any(f.severity == BLOCK for f in findings)
@@ -131,14 +136,14 @@ def render(findings: list[Finding], total_changes: int, review: dict | None, met
 
     if findings:
         lines += ["| Severity | Rule | Resource | Finding | Standard |", "|---|---|---|---|---|"]
-        lines += [f"| {f.severity} | `{f.rule}` | `{f.address}` | {f.message} | {RULE_TO_STANDARD.get(f.rule, '')} |"
+        lines += [f"| {f.severity} | `{f.rule}` | {md_code(f.address)} | {f.message} | {RULE_TO_STANDARD.get(f.rule, '')} |"
                   for f in findings]
         lines.append("")
 
     if review:
         lines += ["### AI explanation (advisory only)", "", review["summary"], ""]
         for e in review["explanations"]:
-            lines += [f"**`{e['address']}`**",
+            lines += [f"**{md_code(e['address'])}**",
                       f"- Why it matters: {e.get('why_it_matters', '')}",
                       f"- Suggestion: {e.get('suggestion', '')}"]
             if e.get("standard"):
@@ -153,7 +158,7 @@ def render(findings: list[Finding], total_changes: int, review: dict | None, met
         lines += [f"- **{s['id']}: {s['title']}.** {s['rule']}" for s in related]
         lines.append("")
 
-    usage = ", ".join(f"{k}: {v}" for k, v in metrics.items() if k != "error")
+    usage = ", ".join(f"{k}: {v}" for k, v in metrics.items() if k not in ("error", "top_scores"))
     lines.append(f"<sub>{usage}</sub>")
     return "\n".join(lines)
 
