@@ -29,10 +29,12 @@ def setup(name):
 
 
 def test_model_sees_attribute_names_but_never_values():
-    _, _, payload = setup("update_tags")
-    text = json.dumps(payload)
-    assert "tags" in text
-    assert "platform" not in text and "ops" not in text     # the tag values stay out
+    from tools import ToolBox
+    changes, _, payload = setup("update_tags")
+    result, ok = ToolBox(changes).run("get_change", {"address": "aws_s3_bucket.logs"})
+    text = json.dumps(payload) + json.dumps(result)
+    assert ok and result["changed_attributes"] == ["tags"]
+    assert "platform" not in text and "ops" not in text     # the tag values never reach the model
 
 
 def test_good_model_output_is_used():
