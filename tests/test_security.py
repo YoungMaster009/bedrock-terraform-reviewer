@@ -55,3 +55,8 @@ def test_every_eval_case_passes_its_deterministic_checks():
     for case in json.loads((ROOT / "evals" / "cases.json").read_text()):
         result = run_evals.run_case(case, use_ai=False)
         assert result["checks"] == {"verdict": True, "findings": True}, case["name"]
+
+
+def test_wildcards_in_finding_messages_are_not_turned_into_italics():
+    from review import md_text
+    assert md_text('Allows every action ("*") on every resource ("*")') == r'Allows every action ("\*") on every resource ("\*")'

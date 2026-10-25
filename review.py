@@ -126,6 +126,11 @@ def md_code(text: str) -> str:
     return "`" + str(text).replace("`", "'").replace("|", "/").replace("\n", " ") + "`"
 
 
+def md_text(text: str) -> str:
+    """Escape Markdown emphasis so a message like ("*") isn't turned into italics."""
+    return str(text).replace("\\", "\\\\").replace("*", "\\*").replace("_", "\\_").replace("|", "/")
+
+
 def render(findings: list[Finding], total_changes: int, review: dict | None, metrics: dict,
            standards: list[dict] | None = None) -> str:
     blocked = any(f.severity == BLOCK for f in findings)
@@ -136,7 +141,7 @@ def render(findings: list[Finding], total_changes: int, review: dict | None, met
 
     if findings:
         lines += ["| Severity | Rule | Resource | Finding | Standard |", "|---|---|---|---|---|"]
-        lines += [f"| {f.severity} | `{f.rule}` | {md_code(f.address)} | {f.message} | {RULE_TO_STANDARD.get(f.rule, '')} |"
+        lines += [f"| {f.severity} | `{f.rule}` | {md_code(f.address)} | {md_text(f.message)} | {RULE_TO_STANDARD.get(f.rule, '')} |"
                   for f in findings]
         lines.append("")
 
